@@ -1,62 +1,104 @@
+export interface TileMarker {
+  x: number
+  y: number
+  label: string
+  color: 'red' | 'green'
+}
+
 export interface Scenario {
   id: string
   name: string
   description: string
   map: string
+  markers: TileMarker[]
   bossSize: number
-  bossAlive: boolean
-  respawnTicks: number
+  bossHp: number
   bossAttackSpeed: number
-  drill: boolean
+  playerAttackSpeed: number
+  playerRange: number
 }
 
 /**
- * Bandos-style layout: an antechamber with an altar (west) and the boss room
- * (east) joined by a single door. The geometry is an approximation for
- * practice — edit the ASCII below to match the real tiles you want to drill.
+ * Graardor's room, best guess. North is up.
+ *
+ * Tile markers come from the OSRS wiki's altar-door section (region 11347):
+ * columns regionX 48 (west row) and 54 (middle row), rows regionY 42–57.
+ * Here grid x = regionX − 47 and grid y = 58 − regionY.
+ *
+ * Unverified: the exact walls, where the door (south wall) and altar
+ * (north wall) sit along them, and Graardor's spawn tile. Edit the ASCII to fix.
  */
-const BANDOS_MAP = `
-############################
-#..........#rrrrrrrrrrrrrrr#
-#..........#rrrrrrrrrrrrrrr#
-#...A......#rrrrrrrrrrrrrrr#
-#..........#rrrrrrrrrrrrrrr#
-#..........#rrrrrrrrrrrrrrr#
-#..........#rrrrrrrrrrrrrrr#
-#..........Drrrrprrrrrrrrrr#
-#..........#rrrrrrrrrrrrrrr#
-#..........#rrrrrrrBrrrrrrr#
-#..........#rrrrrrrrrrrrrrr#
-#..........#rrrrrrrrrrrrrrr#
-############rrrrrrrrrrrrrrr#
-           #rrrrrrrrrrrrrrr#
-           #rrrrrrrrrrrrrrr#
-           #################
+const ROOM = `
+####A##########
+#rrrrrrrrrrrrr#
+#rrrrrrrrrrrrr#
+#rrrrrrrrrrrrr#
+#rrrrrrrrrrrrr#
+#rrrrrrrrrrrrr#
+#rrrrBrrrrrrrr#
+#rrrrrrrrrrrrr#
+#rrrrrrrrrrrrr#
+#rrrrrrrrrrrrr#
+#rrrrrrrrrrrrr#
+#rrrrrrrrrrrrr#
+#rrrrrrrrrrrrr#
+#rrrrrrrrrrrrr#
+#rrrrrrrrrrrrr#
+#rrrrrrrrrrrrr#
+#rrrrrrrrrrrrr#
+####D##########
+#.......#
+#.......#
+#########
 `
+
+const regionToGrid = (rx: number, ry: number) => ({ x: rx - 47, y: 58 - ry })
+
+const ROW_MARKERS: Array<[number, string, 'red' | 'green']> = [
+  [42, 'Shoot-Altar', 'red'],
+  [45, 'D', 'green'],
+  [48, 'A', 'red'],
+  [51, 'D', 'green'],
+  [54, 'A', 'red'],
+  [57, 'Shoot-Door', 'green'],
+]
+
+const markersFor = (regionX: number): TileMarker[] =>
+  ROW_MARKERS.map(([ry, label, color]) => ({ ...regionToGrid(regionX, ry), label, color }))
+
+function withStart(map: string, x: number, y: number, ch: string) {
+  const rows = map.replace(/^\n+|\n+$/g, '').split('\n')
+  rows[y] = rows[y].slice(0, x) + ch + rows[y].slice(x + 1)
+  return rows.join('\n')
+}
+
+const common = {
+  bossSize: 5,
+  bossHp: 255,
+  bossAttackSpeed: 6,
+  playerAttackSpeed: 4,
+  playerRange: 10,
+}
+
+const middle = regionToGrid(54, 42)
 
 export const SCENARIOS: Scenario[] = [
   {
-    id: 'bandos-door-altar',
-    name: 'Bandos door → altar → door',
+    id: 'altar-door-middle',
+    name: 'Altar-door · middle row',
     description:
-      'Boss is dead and the respawn timer is running. Leave through the door, pray at the altar and get back in before it respawns — in as few ticks as possible.',
-    map: BANDOS_MAP,
-    bossSize: 5,
-    bossAlive: false,
-    respawnTicks: 30,
-    bossAttackSpeed: 6,
-    drill: true,
+      'Standing on the south Shoot-Altar tile as Graardor spawns. Shoot him, click the altar, shoot on the red A tiles, then from Shoot-Door click the door and shoot on the green D tiles. After shooting on A/D, click further along the row (or the wall) to keep running. Done right he never hits you.',
+    map: withStart(ROOM, middle.x, middle.y, 'p'),
+    markers: [...markersFor(54), ...markersFor(48)],
+    ...common,
   },
   {
-    id: 'bandos-sandbox',
-    name: 'Bandos sandbox (boss alive)',
+    id: 'altar-door-west',
+    name: 'Altar-door · west row (first kill)',
     description:
-      'Free movement with a 5×5 boss that chases you with simple NPC pathing and hits when you are in melee range. Practise stepping under, around corners and out the door.',
-    map: BANDOS_MAP,
-    bossSize: 5,
-    bossAlive: true,
-    respawnTicks: 30,
-    bossAttackSpeed: 6,
-    drill: false,
+      'Start outside the door. Go in, click the west row Shoot-Door tile, shoot as soon as your true tile lands on it, then click the door and follow the same shoot-on-D / shoot-on-A rhythm.',
+    map: withStart(ROOM, 4, 18, 'P'),
+    markers: [...markersFor(48), ...markersFor(54)],
+    ...common,
   },
 ]

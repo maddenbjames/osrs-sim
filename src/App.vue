@@ -3,29 +3,26 @@ import { computed, markRaw, onBeforeUnmount, onMounted, ref, shallowRef, watch }
 import GameCanvas from './components/GameCanvas.vue'
 import { Game, TICK_MS } from './engine/game'
 import { SCENARIOS } from './engine/scenarios'
-import { optimalRoute } from './engine/optimalRoute'
 import type { Tile } from './engine/types'
 
 const scenarioId = ref(SCENARIOS[0].id)
 const scenario = computed(() => SCENARIOS.find((s) => s.id === scenarioId.value)!)
-const respawnTicks = ref(SCENARIOS[0].respawnTicks)
 const running = ref(true)
 const speed = ref(1)
 const paused = ref(false)
 const showGrid = ref(true)
 const showMelee = ref(true)
-const showTrueTile = ref(true)
-const showRoute = ref(false)
+const showMarkers = ref(true)
 
 const game = shallowRef<Game>(newGame())
-/** Bumped whenever the (non-reactive) game state changes so the panels re-render. */
+/** Bumped whenever the (non-reactive) game changes so the panels re-render. */
 const version = ref(0)
 const started = ref(false)
 let lastTickAt = performance.now()
 let timer: number | undefined
 
 function newGame() {
-  return markRaw(new Game(scenario.value, { running: running.value, respawnTicks: respawnTicks.value }))
+  return markRaw(new Game(scenario.value, { running: running.value }))
 }
 
 const tickMs = computed(() => TICK_MS / speed.value)
@@ -42,11 +39,7 @@ function doTick() {
   game.value.step()
   lastTickAt = performance.now()
   version.value++
-  const d = game.value.drill
-  if (d && (d.finishTick !== null || d.failed)) {
-    if (d.finishTick !== null) saveBest()
-    stopLoop()
-  }
+  if (game.value.finished) stopLoop()
 }
 
 function schedule() {
@@ -56,7 +49,7 @@ function schedule() {
     timer = undefined
     if (paused.value) return
     doTick()
-    if (!drillOver.value) schedule()
+    if (!game.value.finished) schedule()
   }, delay)
 }
 
@@ -65,30 +58,23 @@ function stopLoop() {
   timer = undefined
 }
 
-function startIfNeeded() {
-  if (started.value) return
-  started.value = true
-  lastTickAt = performance.now()
-  schedule()
-}
-
-const drillOver = computed(() => {
-  void version.value
-  const d = game.value.drill
-  return !!d && (d.finishTick !== null || !!d.failed)
-})
-
 function onTileClick(t: Tile) {
-  if (drillOver.value) return
   const g = game.value
+  if (g.finished) return
   const obj = g.map.objectAt(t.x, t.y)
-  g.click(obj ? { type: 'interact', objectId: obj.id } : { type: 'walk', tile: t })
+  if (obj) g.click({ type: 'interact', objectId: obj.id })
+  else if (g.underBoss(t) && g.boss.hp > 0) g.click({ type: 'attack' })
+  else g.click({ type: 'walk', tile: t })
   version.value++
-  startIfNeeded()
+  if (!started.value) {
+    started.value = true
+    lastTickAt = performance.now()
+    schedule()
+  }
 }
 
 function togglePause() {
-  if (!started.value || drillOver.value) return
+  if (!started.value || game.value.finished) return
   paused.value = !paused.value
   if (paused.value) stopLoop()
   else {
@@ -98,7 +84,7 @@ function togglePause() {
 }
 
 function stepOnce() {
-  if (drillOver.value) return
+  if (game.value.finished) return
   started.value = true
   paused.value = true
   stopLoop()
@@ -113,71 +99,47 @@ function toggleRun() {
 
 const progress = () => (paused.value || !started.value ? 1 : (performance.now() - lastTickAt) / tickMs.value)
 
-// ---- Drill readouts --------------------------------------------------
-
-const BEST_KEY = 'osrs-sim:best'
-const bests = ref<Record<string, number>>(loadBests())
-function loadBests(): Record<string, number> {
-  try {
-    return JSON.parse(localStorage.getItem(BEST_KEY) ?? '{}')
-  } catch {
-    return {}
-  }
-}
-const bestKey = computed(() => `${scenarioId.value}:${running.value ? 'run' : 'walk'}`)
-function saveBest() {
-  const t = game.value.drillTicks()
-  if (t === null) return
-  const prev = bests.value[bestKey.value]
-  if (prev === undefined || t < prev) {
-    bests.value = { ...bests.value, [bestKey.value]: t }
-    try {
-      localStorage.setItem(BEST_KEY, JSON.stringify(bests.value))
-    } catch {
-      /* storage unavailable */
-    }
-  }
-}
-
 const view = computed(() => {
   void version.value
   const g = game.value
+  const shots = g.stats.shots
+  const last = shots[shots.length - 1]
   return {
     tick: g.tick,
-    hits: g.hits,
-    drill: g.drill ? { ...g.drill, steps: g.drill.steps.map((s) => ({ ...s })) } : null,
-    drillTicks: g.drillTicks(),
-    inside: g.playerInside(),
-    pos: { ...g.player.pos },
+    hp: g.boss.hp,
+    maxHp: g.boss.maxHp,
+    shots: shots.length,
+    hits: g.stats.hitsTaken,
+    damage: g.stats.damageTaken,
+    gaps: g.shotGaps().slice(-12),
+    streak: g.perfectStreak(),
+    sinceShot: last === undefined ? null : g.tick - last,
+    weaponReady: g.player.attackCooldown === 0,
+    bossCd: g.boss.attackCooldown,
     pending: g.pendingClick,
+    finished: g.finished,
     log: g.log.slice(-60).reverse(),
-    boss: g.boss ? { ...g.boss } : null,
   }
 })
 
-const route = computed(() => (showRoute.value ? optimalRoute(game.value.map, game.value.map.playerStart) : []))
-
-const result = computed(() => {
-  const v = view.value
-  if (!v.drill) return null
-  if (v.drill.failed) return { kind: 'bad', text: v.drill.failed }
-  if (v.drill.finishTick === null) return null
-  const diff = (v.drillTicks ?? 0) - v.drill.optimalTicks
-  return diff <= 0
-    ? { kind: 'good', text: `Tick perfect! ${v.drillTicks} ticks.` }
-    : { kind: 'ok', text: `${v.drillTicks} ticks — ${diff} tick${diff === 1 ? '' : 's'} slower than optimal (${v.drill.optimalTicks}).` }
+/** Metronome: which beat of the 4-tick weapon cycle this tick is, counted from your last shot. */
+const beat = computed(() => {
+  const s = view.value.sinceShot
+  if (s === null) return -1
+  return s % scenario.value.playerAttackSpeed
 })
 
-watch([scenarioId, respawnTicks], reset)
+watch(scenarioId, reset)
 watch(running, () => {
   if (!started.value) reset()
 })
 watch(speed, () => {
-  if (started.value && !paused.value && !drillOver.value) schedule()
+  if (started.value && !paused.value && !game.value.finished) schedule()
 })
 
 function onKey(e: KeyboardEvent) {
-  if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'SELECT') return
+  const tag = (e.target as HTMLElement)?.tagName
+  if (tag === 'INPUT' || tag === 'SELECT') return
   if (e.code === 'Space') {
     e.preventDefault()
     togglePause()
@@ -196,11 +158,11 @@ onBeforeUnmount(() => {
   <div class="app">
     <header>
       <h1>Movement Tech Sim</h1>
-      <p class="sub">Tick-based OSRS-style movement practice · 600 ms ticks · click to move</p>
+      <p class="sub">Tick-accurate kiting practice · 600 ms ticks</p>
     </header>
 
     <div class="layout">
-      <main>
+      <main class="stage">
         <div class="toolbar">
           <select v-model="scenarioId">
             <option v-for="s in SCENARIOS" :key="s.id" :value="s.id">{{ s.name }}</option>
@@ -219,55 +181,53 @@ onBeforeUnmount(() => {
           </label>
         </div>
 
-        <p class="desc">{{ scenario.description }}</p>
-
         <GameCanvas
           :game="game"
           :progress="progress"
           :show-grid="showGrid"
           :show-melee="showMelee"
-          :show-true-tile="showTrueTile"
-          :route="route"
+          :show-markers="showMarkers"
           @tile-click="onTileClick"
         />
 
-        <div class="status">
-          <span class="pill tick" :key="view.tick">Tick {{ view.tick }}</span>
-          <span class="pill">{{ view.inside ? 'Inside boss room' : 'Outside' }}</span>
-          <span class="pill">Tile ({{ view.pos.x }}, {{ view.pos.y }})</span>
-          <span class="pill" :class="{ bad: view.hits > 0 }">Hits taken {{ view.hits }}</span>
-          <span class="pill" v-if="view.pending">Click queued for next tick</span>
-          <span class="pill muted" v-if="!started">Click a tile, the door or the altar to start</span>
-        </div>
-
         <div class="toggles">
+          <label><input type="checkbox" v-model="showMarkers" /> Tile markers</label>
+          <label><input type="checkbox" v-model="showMelee" /> Graardor melee range</label>
           <label><input type="checkbox" v-model="showGrid" /> Grid</label>
-          <label><input type="checkbox" v-model="showTrueTile" /> True tile</label>
-          <label><input type="checkbox" v-model="showMelee" /> Boss melee range</label>
-          <label v-if="scenario.drill"><input type="checkbox" v-model="showRoute" /> Show optimal route</label>
         </div>
       </main>
 
       <aside>
-        <section v-if="view.drill" class="card">
-          <h2>Drill</h2>
-          <label class="inline">
-            Respawn timer
-            <input type="number" min="5" max="200" v-model.number="respawnTicks" /> ticks
-          </label>
-          <ol class="steps">
-            <li v-for="s in view.drill.steps" :key="s.id" :class="{ done: s.doneTick !== null }">
-              <span>{{ s.label }}</span>
-              <span class="when" v-if="s.doneTick !== null">tick {{ s.doneTick - (view.drill.startTick ?? 0) }}</span>
-            </li>
-          </ol>
-          <div class="numbers">
-            <div><span class="label">Time</span><span class="big">{{ view.drillTicks ?? 0 }}</span></div>
-            <div><span class="label">Optimal</span><span class="big">{{ view.drill.optimalTicks }}</span></div>
-            <div><span class="label">Best</span><span class="big">{{ bests[bestKey] ?? '–' }}</span></div>
-            <div v-if="view.boss && !view.boss.alive"><span class="label">Respawn</span><span class="big">{{ view.boss.respawnIn }}</span></div>
+        <section class="card">
+          <div class="metronome" :title="'Beat of your 4-tick weapon cycle, counted from your last shot'">
+            <div v-for="i in scenario.playerAttackSpeed" :key="i" class="beat" :class="{ now: beat === i - 1, shoot: i === 1 }">
+              {{ i === 1 ? 'SHOOT' : i - 1 }}
+            </div>
           </div>
-          <div v-if="result" class="result" :class="result.kind">{{ result.text }}</div>
+          <div class="numbers">
+            <div><span class="label">Tick</span><span class="big">{{ view.tick }}</span></div>
+            <div><span class="label">Shots</span><span class="big">{{ view.shots }}</span></div>
+            <div><span class="label">4-tick streak</span><span class="big good">{{ view.streak }}</span></div>
+            <div><span class="label">Hits taken</span><span class="big" :class="{ bad: view.hits > 0 }">{{ view.hits }}</span></div>
+          </div>
+          <div class="hp">
+            <div class="hp-fill" :style="{ width: (100 * view.hp) / view.maxHp + '%' }" />
+            <span>Graardor {{ view.hp }} / {{ view.maxHp }}</span>
+          </div>
+          <div class="gaps" v-if="view.gaps.length">
+            <span class="label">Ticks between shots</span>
+            <span v-for="(g, i) in view.gaps" :key="i" class="gap" :class="{ perfect: g === scenario.playerAttackSpeed }">{{ g }}</span>
+          </div>
+          <div v-if="view.finished" class="result" :class="view.hits === 0 ? 'good' : 'ok'">
+            Graardor dead in {{ view.tick }} ticks · {{ view.hits === 0 ? 'no hits taken, clean kill!' : `${view.hits} hits taken (${view.damage} damage)` }}
+          </div>
+          <p v-else-if="!started" class="muted hint">Click Graardor to shoot, then red-X the altar. Clicks act on the next tick.</p>
+          <p v-else-if="view.pending" class="muted hint">Click queued for next tick…</p>
+        </section>
+
+        <section class="card">
+          <h2>Scenario</h2>
+          <p class="desc">{{ scenario.description }}</p>
         </section>
 
         <section class="card">
@@ -281,12 +241,13 @@ onBeforeUnmount(() => {
         </section>
 
         <section class="card help">
-          <h2>How it works</h2>
+          <h2>Rules modelled</h2>
           <ul>
-            <li>The game runs on 600 ms ticks. A click is queued and acts on the next tick; only your last click before the tick counts.</li>
-            <li>Running moves 2 tiles a tick, walking 1. Paths use the game's breadth-first order (W, E, S, N, then diagonals) and can't cut wall corners.</li>
-            <li>Clicking the door or altar paths you next to it; the interaction happens on the tick you arrive.</li>
-            <li>The boss is 5×5, chases with simple NPC pathing, can't follow through the door, and only hits from directly beside it (not the corners).</li>
+            <li>600 ms ticks. Your last click before a tick is the one processed.</li>
+            <li>Graardor (5×5) is processed before you each tick, chases with NPC pathing, hits every 6 ticks from directly beside him (not corners), and steps out when you're underneath.</li>
+            <li>Your bow fires every 4 ticks. Shooting stops your movement; you can't shoot from under him.</li>
+            <li>Clicking the door or altar (red X) paths you toward it with the game's route finder. Run is 2 tiles a tick.</li>
+            <li>The room layout and Graardor's spawn are a best guess from the wiki's tile markers.</li>
           </ul>
         </section>
       </aside>
@@ -295,45 +256,50 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.app { max-width: 1280px; margin: 0 auto; padding: 16px; }
+.stage { text-align: center; }
+.app { max-width: 1320px; margin: 0 auto; padding: 16px; }
 header h1 { margin: 0; font-size: 22px; color: var(--accent); }
 .sub { margin: 2px 0 12px; color: var(--muted); font-size: 14px; }
-.layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; align-items: start; }
 @media (max-width: 960px) { .layout { grid-template-columns: 1fr; } }
-.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+.toolbar { justify-content: center; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
 .toolbar label { display: flex; gap: 6px; align-items: center; color: var(--muted); }
 button.on { border-color: var(--good); }
 button:disabled { opacity: 0.5; cursor: default; }
-.desc { color: var(--muted); margin: 4px 0 10px; font-size: 14px; max-width: 900px; }
-.status, .toggles { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 13px; }
+.toggles { justify-content: center; display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; font-size: 13px; }
 .toggles label { color: var(--muted); display: flex; gap: 4px; align-items: center; }
-.pill { background: var(--panel); border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; }
-.pill.bad { border-color: var(--bad); color: var(--bad); }
-.pill.muted, .muted { color: var(--muted); }
-.pill.tick { animation: pulse 0.3s ease-out; }
-@keyframes pulse { from { border-color: var(--accent); background: #3a2f14; } }
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
-.card h2 { margin: 0 0 8px; font-size: 15px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
-.inline { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
-.inline input { width: 70px; }
-.steps { padding-left: 20px; margin: 10px 0; }
-.steps li { margin: 4px 0; display: flex; justify-content: space-between; gap: 8px; }
-.steps li.done { color: var(--good); }
-.when { font-variant-numeric: tabular-nums; color: var(--muted); }
+.card h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.desc { margin: 0; font-size: 13px; color: var(--text); line-height: 1.45; }
+.metronome { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 10px; }
+.beat { text-align: center; padding: 10px 0; border-radius: 8px; background: var(--panel-2); color: var(--muted); font-weight: 700; font-size: 13px; transition: background 0.08s; }
+.beat.shoot { color: var(--accent); }
+.beat.now { background: #3a3220; color: var(--text); box-shadow: inset 0 0 0 2px var(--accent); }
+.beat.now.shoot { background: var(--accent); color: #1b1408; }
 .numbers { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
 .numbers div { background: var(--panel-2); border-radius: 6px; padding: 6px; text-align: center; }
-.label { display: block; font-size: 11px; color: var(--muted); text-transform: uppercase; }
+.label { display: block; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
 .big { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.big.good { color: var(--good); }
+.big.bad { color: var(--bad); }
+.hp { position: relative; margin-top: 10px; height: 22px; background: #5a1a15; border-radius: 6px; overflow: hidden; }
+.hp-fill { position: absolute; inset: 0 auto 0 0; background: #2f8f3e; transition: width 0.2s; }
+.hp span { position: relative; display: block; text-align: center; font-size: 12px; line-height: 22px; font-weight: 600; }
+.gaps { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.gaps .label { width: 100%; }
+.gap { min-width: 22px; text-align: center; border-radius: 4px; padding: 1px 4px; background: rgba(229,83,75,0.2); color: var(--bad); font-variant-numeric: tabular-nums; font-size: 13px; }
+.gap.perfect { background: rgba(92,196,106,0.18); color: var(--good); }
 .result { margin-top: 10px; padding: 8px 10px; border-radius: 6px; font-weight: 600; }
 .result.good { background: rgba(92,196,106,0.15); color: var(--good); }
 .result.ok { background: rgba(240,180,41,0.15); color: var(--accent); }
-.result.bad { background: rgba(229,83,75,0.15); color: var(--bad); }
-.log { list-style: none; padding: 0; margin: 0; max-height: 260px; overflow-y: auto; font-size: 13px; font-family: ui-monospace, monospace; }
+.hint { margin: 10px 0 0; font-size: 13px; }
+.muted { color: var(--muted); }
+.log { list-style: none; padding: 0; margin: 0; max-height: 220px; overflow-y: auto; font-size: 12.5px; font-family: ui-monospace, monospace; }
 .log li { padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
 .log .t { display: inline-block; width: 34px; color: var(--muted); }
 .log .hit { color: var(--bad); }
-.log .drill { color: var(--good); }
-.log .interact { color: var(--info); }
+.log .shot { color: var(--good); }
+.log .interact, .log .done { color: var(--info); }
 .help ul { margin: 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
 .help li { margin: 4px 0; }
 </style>

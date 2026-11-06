@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { TileMap } from '../src/engine/map'
 import { findPath, findPathToAny } from '../src/engine/pathfinding'
-import { Game, bossInMelee, optimalDrillTicks } from '../src/engine/game'
+import { Game, bossInMelee } from '../src/engine/game'
 import { SCENARIOS } from '../src/engine/scenarios'
 
 const open = new TileMap(`
@@ -60,7 +60,7 @@ describe('pathfinding', () => {
   })
 })
 
-describe('boss', () => {
+describe('Graardor', () => {
   it('melee range excludes diagonal corners', () => {
     const b = { x: 2, y: 2, size: 5 }
     expect(bossInMelee(b, { x: 1, y: 2 })).toBe(true)
@@ -69,16 +69,27 @@ describe('boss', () => {
     expect(bossInMelee(b, { x: 7, y: 7 })).toBe(false)
   })
 
-  it('chases and hits a player standing in the room', () => {
-    const g = new Game(SCENARIOS[1])
-    for (let i = 0; i < 10; i++) g.step()
-    expect(g.hits).toBeGreaterThan(0)
+  it('hits every 6 ticks while you stand in melee range', () => {
+    const g = new Game(SCENARIOS[0], { seed: 1 })
+    g.player.pos = { x: g.boss.x - 1, y: g.boss.y + 2 }
+    for (let i = 0; i < 13; i++) g.step()
+    expect(g.stats.hitsTaken).toBe(3) // ticks 1, 7, 13
+  })
+
+  it('moves before the player each tick (NPCs process first)', () => {
+    const g = new Game(SCENARIOS[0], { seed: 1 })
+    const b0 = { x: g.boss.x, y: g.boss.y }
+    g.click({ type: 'walk', tile: { x: 13, y: 16 } })
+    g.step()
+    // Boss chased the player's *previous* tile, the player then ran away.
+    expect({ x: g.boss.x, y: g.boss.y }).not.toEqual(b0)
+    expect(g.player.pos.x).toBe(g.player.prev.x + 2)
   })
 })
 
-describe('door → altar drill', () => {
+describe('player', () => {
   it('runs 2 tiles per tick and clicks apply on the next tick', () => {
-    const g = new Game(SCENARIOS[0])
+    const g = new Game(SCENARIOS[0], { seed: 1 })
     const start = { ...g.player.pos }
     g.click({ type: 'walk', tile: { x: start.x + 4, y: start.y } })
     expect(g.player.pos).toEqual(start)
@@ -86,27 +97,42 @@ describe('door → altar drill', () => {
     expect(g.player.pos).toEqual({ x: start.x + 2, y: start.y })
   })
 
-  it('completes in the optimal tick count with perfect clicks', () => {
-    const g = new Game(SCENARIOS[0])
-    const door = g.map.objects.find((o) => o.kind === 'door')!
-    const altar = g.map.objects.find((o) => o.kind === 'altar')!
-    const doClick = (id: string, guard: () => boolean) => {
-      g.click({ type: 'interact', objectId: id })
-      for (let i = 0; i < 50 && !guard(); i++) g.step()
-    }
-    doClick(door.id, () => g.drill!.steps[0].doneTick !== null)
-    doClick(altar.id, () => g.drill!.steps[1].doneTick !== null)
-    doClick(door.id, () => g.drill!.steps[2].doneTick !== null)
-    expect(g.drill!.failed).toBeNull()
-    expect(g.drillTicks()).toBe(g.drill!.optimalTicks)
-    expect(g.playerInside()).toBe(true)
-    expect(g.drill!.optimalTicks).toBe(optimalDrillTicks(g.map, g.map.playerStart, true))
+  it('shoots on a 4-tick cycle while standing still', () => {
+    const g = new Game(SCENARIOS[0], { seed: 1 })
+    g.player.pos = { x: 13, y: 16 }
+    g.boss.x = 1
+    g.boss.y = 1
+    g.click({ type: 'attack' })
+    for (let i = 0; i < 9; i++) g.step()
+    expect(g.stats.shots).toEqual([1, 5, 9])
+    expect(g.shotGaps()).toEqual([4, 4])
+    expect(g.perfectStreak()).toBe(2)
   })
 
-  it('fails when the boss respawns first', () => {
-    const g = new Game(SCENARIOS[0], { respawnTicks: 3 })
-    g.click({ type: 'walk', tile: { x: 20, y: 7 } })
-    for (let i = 0; i < 5; i++) g.step()
-    expect(g.drill!.failed).not.toBeNull()
+  it('red-X on the altar paths up the row and is cancelled by shooting', () => {
+    const g = new Game(SCENARIOS[0], { seed: 1 })
+    g.boss.x = 9
+    g.boss.y = 12
+    const altar = g.map.objects.find((o) => o.kind === 'altar')!
+    const x0 = g.player.pos.x
+    g.click({ type: 'interact', objectId: altar.id })
+    g.step()
+    g.step()
+    g.step()
+    expect(g.player.pos).toEqual({ x: x0, y: 10 }) // the first "A" tile, straight up the column
+    g.click({ type: 'attack' })
+    g.step()
+    expect(g.player.pos).toEqual({ x: x0, y: 10 })
+    expect(g.player.interaction).toBeNull()
+    expect(g.stats.shots.length).toBe(1)
+  })
+
+  it('enters the room through the door', () => {
+    const g = new Game(SCENARIOS[1], { seed: 1 })
+    const door = g.map.objects.find((o) => o.kind === 'door')!
+    expect(g.playerInside()).toBe(false)
+    g.click({ type: 'interact', objectId: door.id })
+    for (let i = 0; i < 3; i++) g.step()
+    expect(g.playerInside()).toBe(true)
   })
 })
